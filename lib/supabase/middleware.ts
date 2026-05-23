@@ -25,9 +25,7 @@ export async function updateSession(request: NextRequest) {
     }
   );
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: { user } } = await supabase.auth.getUser();
 
   const protectedRoutes = ["/dashboard"];
   const authRoutes = ["/auth/login", "/auth/signup"];
