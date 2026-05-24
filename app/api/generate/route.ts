@@ -14,13 +14,13 @@ export async function POST(request: Request) {
     // Check credits
     const { data: profile } = await supabase
       .from("profiles")
-      .select("credits_remaining")
+      .select("credits_remaining, credits_per_month")
       .eq("id", user.id)
       .single();
 
     if (!profile || profile.credits_remaining <= 0) {
       return NextResponse.json(
-        { error: "No credits remaining. Upgrade your plan to continue." },
+        { error: "No credits remaining. Upgrade your plan to continue generating." },
         { status: 429 }
       );
     }
@@ -28,25 +28,25 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { brandName, industry, style, description } = body;
 
-    if (!brandName || !industry || !style) {
+    if (!brandName?.trim() || !industry || !style) {
       return NextResponse.json(
         { error: "Missing required fields: brandName, industry, style" },
         { status: 400 }
       );
     }
 
-    // Generate brand assets
-    const result = await generateBrandAssets({ brandName, industry, style, description });
+    // Generate brand assets via Groq
+    const result = await generateBrandAssets({ brandName: brandName.trim(), industry, style, description });
 
     // Save to database
-    const { data: savedGeneration } = await supabase
+    const { data: savedGeneration, error: saveError } = await supabase
       .from("logo_generations")
       .insert({
         user_id: user.id,
-        brand_name: brandName,
+        brand_name: brandName.trim(),
         industry,
         style,
-        description,
+        description: description || null,
         logo_prompt: result.logo_prompt,
         slogans: result.slogans,
         color_palettes: result.color_palettes,
@@ -57,23 +57,37 @@ export async function POST(request: Request) {
       .select()
       .single();
 
+    if (saveError) {
+      console.error("DB save error:", saveError);
+    }
+
     // Decrement credits
     await supabase
       .from("profiles")
-      .update({ credits_remaining: profile.credits_remaining - 1 })
+      .update({ credits_remaining: Math.max(0, profile.credits_remaining - 1) })
       .eq("id", user.id);
+
+    // Send email notification (fire and forget — don't block the response)
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://logo-ai-generator-two.vercel.app";
+    const shareUrl = savedGeneration?.id ? `${appUrl}/share/${savedGeneration.id}` : null;
+
+    fetch(`${appUrl}/api/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": request.headers.get("cookie") || "" },
+      body: JSON.stringify({ brandName: brandName.trim(), industry, style, shareUrl }),
+    }).catch(() => {/* Email is best-effort */});
 
     return NextResponse.json({
       result: {
         ...result,
-        id: savedGeneration?.id,
+        id: savedGeneration?.id || null,
       },
+      creditsRemaining: Math.max(0, profile.credits_remaining - 1),
     });
+
   } catch (err) {
     console.error("Generation error:", err);
-    return NextResponse.json(
-      { error: "Failed to generate brand assets. Please try again." },
-      { status: 500 }
-    );
+    const message = err instanceof Error ? err.message : "Failed to generate brand assets";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
